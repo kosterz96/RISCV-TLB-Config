@@ -7,24 +7,6 @@ import chisel3.tester._
 import org.scalatest.FreeSpec
 import chisel3.experimental.BundleLiterals._
 
-
-/*
-  * This is a trivial example of how to run this Specification
-  * From within sbt use:
-  * {{{
-  * testOnly gcd.GcdDecoupledTester
-  * }}}
-  * From a terminal shell use:
-  * {{{
-  * sbt 'testOnly gcd.GcdDecoupledTester'
-  * }}}
- 
-
-object CoLT_FA_test extends App {
-  chisel3.iotesters.Driver(() => new CoLT_FA()) { c => new CoLT_FA_test }
-  //chisel3.testers.TesterDriver( () => new CoLT_FA_test)
-}
-   */
 class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
   "CoLT should read appropriate values" in {
       test (new CoLT_FA()) { c => 

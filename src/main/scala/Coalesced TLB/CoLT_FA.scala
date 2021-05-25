@@ -64,10 +64,11 @@ class CoLT_FA () extends Module {
     val previousRetValid = RegNext (io.retAddress.valid, false.B)
     val reqVPN=WireDefault(0.U(vpn_width.W))
     val resultIndex = WireDefault(0.U(log2Ceil(tlbSize).W))
-    val foundReg = WireDefault(false.B)
+    val tlbHit = WireDefault(false.B)
     val operationDone = WireDefault(false.B) //probably useless
     //val operationDone = RegNext(io.retAddress.valid)
     val cacheLineRegs = Reg(Vec(cacheLineSize,UInt(ppn_width.W)))
+    val isCoalescable = WireDefault(false.B)
 
     // FSM Logic
     val idle :: lookup :: waitPTW :: fill :: Nil = Enum (4)
@@ -78,19 +79,19 @@ class CoLT_FA () extends Module {
             .elsewhen(io.writeEnable ) {stateReg := fill}
         }
         is (lookup){
-            when (!operationDone ) {stateReg := waitPTW}
+            when (!operationDone) {stateReg := waitPTW}
             .elsewhen(operationDone) { stateReg := idle }
         }
         is (waitPTW){
             when(io.writeAddress.valid && io.writeEnable ) { stateReg := fill}
         }
         is (fill){
-            
+            when (operationDone) {stateReg:=idle}
         }
     }
     
     //io.readAddress.ready := stateReg === idle
-    io.readAddress.ready := true.B 
+    io.readAddress.ready := stateReg === idle  
     io.writeAddress.ready:= stateReg === idle 
     
 
@@ -107,19 +108,19 @@ class CoLT_FA () extends Module {
     val validRegs = RegInit(VecInit(true.B,true.B,false.B,false.B,true.B,true.B,false.B,false.B))
     // ============== END OF NOOOOOOOOOOB ===================
 
-    io.retAddress.valid := foundReg && validRegs(resultIndex)
-    operationDone := foundReg && validRegs(resultIndex)
+    io.retAddress.valid := tlbHit && validRegs(resultIndex)
+    operationDone := tlbHit && validRegs(resultIndex)
     when (stateReg===lookup) {
         printf("======== Entered lookup mode ========\n")
         reqVPN := getVPNfromVA(io.readAddress.bits)
         printf("\t reqVPN=%d\n", reqVPN)
         //=================== Range check logic ===================
-        foundReg := coltEntriesRegs.exists{
+        tlbHit := coltEntriesRegs.exists{
             case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
                       (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
         }
-        printf("\t foundReg=%d\n", foundReg)
-        // "foundReg" is set if the requested address matches the range check logic
+        printf("\t tlbHit=%d\n", tlbHit)
+        // "tlbHit" is set if the requested address matches the range check logic
         
         resultIndex := coltEntriesRegs.indexWhere {
             case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
@@ -135,10 +136,10 @@ class CoLT_FA () extends Module {
         printf("\t operationDone=%d\n", operationDone)
 
         // Update-return operations
-        io.retAddress.bits := Mux(foundReg && validRegs(resultIndex), finalRes, previousRetAddressReg)
-        //io.retAddress.valid := Mux(foundReg && validRegs(resultIndex), foundReg && validRegs(resultIndex), previousRetValid)
+        io.retAddress.bits := Mux(tlbHit && validRegs(resultIndex), finalRes, previousRetAddressReg)
+        //io.retAddress.valid := Mux(tlbHit && validRegs(resultIndex), tlbHit && validRegs(resultIndex), previousRetValid)
         printf("\t valid=%d\n", io.retAddress.valid)
-        //operationDone := foundReg && validRegs(resultIndex)
+        //operationDone := tlbHit && validRegs(resultIndex)
     }
     .elsewhen (stateReg===fill) { 
         // Spit PPNs. SOS!!!!!!!!: We need the PTE entries and then extract the PPN. See IO comments!!!!!!
@@ -158,6 +159,7 @@ class CoLT_FA () extends Module {
         printf(s"Address ${io.writeAddress} was written. Index=$idx\n")
          ============= END OF NOOB IMPLEMENTATION =============================
         */
+        isCoalescable := cacheLineRegs.map(x=> coalCheck(reqVPN, getPPNfromTLB(x))).reduce(_&&_)
 
         io.retAddress.bits := 0.U
         io.retAddress.valid:= true.B
@@ -188,5 +190,16 @@ class CoLT_FA () extends Module {
     }
     def getPPNfromPA (entry: UInt):UInt={
         entry(pMemAddressWidth-1, pMemAddressWidth-ppn_width)
+    }
+    def vmask (entry: UInt): UInt= {entry(vpn_width-1,coalBits)}
+    def pmask (entry: UInt): UInt= {entry(ppn_width-1,coalBits)}
+    def voffset (entry: UInt): UInt= {entry(coalBits-1,0)}
+    def poffset (entry: UInt): UInt= {entry(coalBits-1,0)}
+
+    def coalCheck (request:UInt, CoLT_entry: UInt): Bool={
+        vmask(request)===vmask(CoLT_entry) &&
+        voffset(request)===(voffset(CoLT_entry)+1.U) &&
+        voffset(CoLT_entry)+1.U <= math.pow(2,coalBits).toInt.U-1.U &&
+        pmask(request) === pmask(CoLT_entry)
     }
 }
