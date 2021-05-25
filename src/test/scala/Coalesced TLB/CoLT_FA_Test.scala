@@ -1,37 +1,11 @@
 // See README.md for license details.
 
 package CoLT
-/*
-import chisel3._
-import chisel3.tester._
-import chiseltest.RawTester._
-import chisel3.testers._
-import org.scalatest.FreeSpec
-import chisel3.experimental.BundleLiterals._
-
-
-import chisel3._
-import chisel3.util._
-import chisel3.tester._
-import chisel3.iotesters.PeekPokeTester
-import chiseltest._
-import chiseltest.experimental._
-import org.scalatest.{Matchers, FlatSpec}
-import chisel3.testers.BasicTester
-
-import chisel3._
-import chisel3.util._
-import chisel3.experimental._
-import chisel3.experimental.BundleLiterals._
-import chisel3.tester._
-import chisel3.tester.RawTester.test
-*/
 
 import chisel3._
 import chisel3.tester._
 import org.scalatest.FreeSpec
 import chisel3.experimental.BundleLiterals._
-
 
 
 /*
@@ -52,46 +26,52 @@ object CoLT_FA_test extends App {
 }
    */
 class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
-    "CoLT should read appropriate values" in {
-        test (new CoLT_FA()) { c => 
-        /*
-        // Read non-existent entry
-        c.io.readEnable.poke(true.B)
-        c.io.readAddress.poke(76.U)
-        c.clock.step(2)
-        c.io.validData.expect(false.B)
-        c.io.retAddress.expect (0.U)
-        
-        
-        // Write address 12 address at 3
-        c.io.readEnable.poke(false.B)
-        c.io.writeEnable.poke(true.B)
-        c.io.writeAddress.poke(12.U)
-        c.io.writeData.poke(3.U)
-        c.clock.step(2)
-        c.io.retAddress.expect (0.U)
-        
-        */
-        // Read non-existent entry
-        c.io.readEnable.poke(true.B)
-        c.io.readAddress.poke(37.U)
-        c.clock.step(3)
-        c.io.retAddress.expect(3.U)
-        c.io.validData.expect(true.B)
-            
-        c.io.readEnable.poke(true.B)
-        c.io.readAddress.poke(91.U)
-        c.clock.step(3)
-        c.io.validData.expect(true.B)
-        c.io.retAddress.expect(1.U)
-        
-        c.io.readEnable.poke(true.B)
-        c.io.readAddress.poke(99.U)
-        c.clock.step(3)
-        c.io.validData.expect(true.B)
-        c.io.retAddress.expect(2.U)   
-        
-        println("Success!")
-        }
-    }
+  "CoLT should read appropriate values" in {
+      test (new CoLT_FA()) { c => 
+      
+      c.io.readEnable.poke(true.B)
+      c.io.readAddress.bits.poke(37.U)
+      c.io.readAddress.valid.poke(true.B)
+      c.io.retAddress.ready.poke(true.B)
+      c.clock.step(2)
+      c.io.retAddress.bits.expect(3.U)
+      c.io.retAddress.valid.expect(true.B)
+
+          
+      c.io.readEnable.poke(true.B)
+      c.io.readAddress.bits.poke(91.U)
+      c.io.readAddress.valid.poke(true.B)
+      c.io.retAddress.ready.poke(true.B)
+      c.clock.step(2)
+      c.io.retAddress.bits.expect(1.U)
+      c.io.retAddress.valid.expect(true.B)
+      
+      
+      c.io.readEnable.poke(true.B)
+      c.io.readAddress.bits.poke(99.U)
+      c.io.readAddress.valid.poke(true.B)
+      c.io.retAddress.ready.poke(true.B)
+      c.clock.step(2)
+      c.io.retAddress.valid.expect(true.B)
+      c.io.retAddress.bits.expect(2.U)   
+      /*
+
+
+
+      c.io.readAddress.initSource()
+      c.io.readAddress.setSourceClock(c.clock)
+      c.io.writeAddress.initSource()
+      c.io.writeAddress.setSourceClock(c.clock)
+      c.io.retAddress.initSink()
+      c.io.retAddress.setSinkClock(c.clock)
+
+      c.io.readEnable.poke(true.B)
+      c.io.readAddress.enqueueNow(37.U)
+      //c.clock.step()
+      c.io.retAddress.expectDequeueNow(3.U)
+
+*/
+      println("Success!")
+      }
+  }
 }

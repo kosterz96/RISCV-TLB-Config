@@ -3,14 +3,12 @@ package CoLT
 import chisel3._
 import chisel3.util._
 import chisel3.testers._
-//import chisel3.testers.RawTester.test
 
-// import CoLT.Params
 
 object CoLT_FA extends App{
     //chisel3.Driver.execute(Array[String](), () => new CoLT_FA)
     //val arguments = new Array[String](5)
-    chisel3.stage.ChiselStage.elaborate(new CoLT_FA)
+    chisel3.stage.ChiselStage.elaborate(new CoLT_FA())
 }
 
 class CoLT_FA () extends Module {
@@ -19,7 +17,7 @@ class CoLT_FA () extends Module {
     val vMemSize = 256
     val vMemAddressWidth: Int = log2Ceil(vMemSize)
     val cacheLineSize = 4 // Number of pages to be fetched from a PTW
-    val ptSize = 128  // 2^7
+    val ptSize = 128  // entries
     val pageSize = 32 //bits
     val pageOffset = log2Ceil(pageSize)
     val dataWidth = 32
@@ -41,31 +39,62 @@ class CoLT_FA () extends Module {
     val ppn_tlb_end          =ppn_tlb_start-ppn_width+1
 
     val io = IO(new Bundle {
-        val readAddress = Input (UInt(vMemAddressWidth.W))  // Determines the requested VIRTUAL address
+        val readAddress = Flipped(Decoupled(Input (UInt(vMemAddressWidth.W))))  // Determines the requested VIRTUAL address
         val readEnable = Input(Bool())                      // Determines whether or not read operation is allowed
         
         // Incoming write operations indicate that a page table walk has been conducted
         // The "write Address" field indicates the page that was found
         // and brought into the CoLT-FA TLB to be stored
-        val writeAddress = Input (UInt((cacheLineSize*pMemAddressWidth).W)) 
+        val writeAddress = Flipped(Decoupled(Input (UInt((cacheLineSize*ppn_width).W)))) // SOS!!!!! The incoming write requests are PTEs, not PPNs!
         val writeEnable = Input(Bool())
-        val writeData = Input (UInt(dataWidth.W)) //maybe useless
-        
+
+        val retAddress = Decoupled(Output(UInt(ppn_width.W))) //Returns the desired PPN
+
+        /*
+        val writeData = Flipped(Decoupled(Input (UInt(dataWidth.W)))) //maybe useless
         val retData = Output (UInt(dataWidth.W))    // Provides the requested TLB entry
         val validData = Output (Bool())             // Ensures that the TLB entry provided to the consumer
                                                     // is valid (it was found among the entries)
                                                     // and it's not just the previous return address. Check lookup.
-        val retAddress = Output (UInt(ppn_width.W)) //Returns the desired PPN
+        */
+        
     })
     
-    val previousRetAddressReg = RegNext(io.retAddress, 0.U(ppn_width.W))
-    val reqVPN=Reg(UInt(vpn_width.W))
-    val resultIndexReg = Reg(UInt(log2Ceil(tlbSize).W))
-    val foundReg = RegInit(false.B)
+    val previousRetAddressReg = RegNext(io.retAddress.bits, 0.U(ppn_width.W))
+    val previousRetValid = RegNext (io.retAddress.valid, false.B)
+    val reqVPN=WireDefault(0.U(vpn_width.W))
+    val resultIndex = WireDefault(0.U(log2Ceil(tlbSize).W))
+    val foundReg = WireDefault(false.B)
+    val operationDone = WireDefault(false.B) //probably useless
+    //val operationDone = RegNext(io.retAddress.valid)
+    val cacheLineRegs = Reg(Vec(cacheLineSize,UInt(ppn_width.W)))
+
+    // FSM Logic
+    val idle :: lookup :: waitPTW :: fill :: Nil = Enum (4)
+    val stateReg = RegInit(idle)
+    switch (stateReg){
+        is (idle){
+            when (io.readEnable ) { stateReg:= lookup}
+            .elsewhen(io.writeEnable ) {stateReg := fill}
+        }
+        is (lookup){
+            when (!operationDone ) {stateReg := waitPTW}
+            .elsewhen(operationDone) { stateReg := idle }
+        }
+        is (waitPTW){
+            when(io.writeAddress.valid && io.writeEnable ) { stateReg := fill}
+        }
+        is (fill){
+            
+        }
+    }
     
-    val pMem = SyncReadMem(pMemSize, UInt(dataWidth.W))
+    //io.readAddress.ready := stateReg === idle
+    io.readAddress.ready := true.B 
+    io.writeAddress.ready:= stateReg === idle 
+    
+
     //val coltEntriesRegs = RegInit(VecInit(Seq.fill(tlbSize)(0.U(tlbEntryWidth.W))))
-    
     // ========= NOOOOOOOOB =================
     val coltEntriesRegs = RegInit(VecInit(259.U(tlbEntryWidth.W),
                                           545.U(tlbEntryWidth.W),
@@ -75,52 +104,70 @@ class CoLT_FA () extends Module {
                                           1538.U(tlbEntryWidth.W),
                                           0.U(tlbEntryWidth.W),
                                           0.U(tlbEntryWidth.W)))
+    val validRegs = RegInit(VecInit(true.B,true.B,false.B,false.B,true.B,true.B,false.B,false.B))
     // ============== END OF NOOOOOOOOOOB ===================
 
-    
-    when (io.readEnable) {
-        reqVPN := getVPNfromVA(io.readAddress)
+    io.retAddress.valid := foundReg && validRegs(resultIndex)
+    operationDone := foundReg && validRegs(resultIndex)
+    when (stateReg===lookup) {
+        printf("======== Entered lookup mode ========\n")
+        reqVPN := getVPNfromVA(io.readAddress.bits)
+        printf("\t reqVPN=%d\n", reqVPN)
         //=================== Range check logic ===================
-        foundReg := coltEntriesRegs.exists{case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress)) && (getVPNfromVA(io.readAddress)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))}
+        foundReg := coltEntriesRegs.exists{
+            case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
+                      (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
+        }
+        printf("\t foundReg=%d\n", foundReg)
         // "foundReg" is set if the requested address matches the range check logic
         
-        resultIndexReg := coltEntriesRegs.indexWhere {case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress)) && (getVPNfromVA(io.readAddress)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))}
-        // "resultIndexReg" stores the index of the TLB entry that matched the request
+        resultIndex := coltEntriesRegs.indexWhere {
+            case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
+            (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
+        }
+        printf("\t resultIndex=%d\n", resultIndex)
+        // "resultIndex" stores the index of the TLB entry that matched the request
         // If the requested TLB entry was not found (TLB miss), then "result" value is 0.U
         
         //=================== PPN Generation Logic ===================
-        val finalRes = getVPNfromVA(io.readAddress) - getVPNfromTLB(coltEntriesRegs(resultIndexReg)) + getPPNfromTLB(coltEntriesRegs(resultIndexReg))
-        
+        val finalRes = getVPNfromVA(io.readAddress.bits) - getVPNfromTLB(coltEntriesRegs(resultIndex)) + getPPNfromTLB(coltEntriesRegs(resultIndex))
+        printf("\t Final result: %d \n", finalRes)
+        printf("\t operationDone=%d\n", operationDone)
+
         // Update-return operations
-        io.retAddress := Mux(foundReg, finalRes, previousRetAddressReg)
-        io.validData := foundReg
+        io.retAddress.bits := Mux(foundReg && validRegs(resultIndex), finalRes, previousRetAddressReg)
+        //io.retAddress.valid := Mux(foundReg && validRegs(resultIndex), foundReg && validRegs(resultIndex), previousRetValid)
+        printf("\t valid=%d\n", io.retAddress.valid)
+        //operationDone := foundReg && validRegs(resultIndex)
     }
-    .elsewhen (io.writeEnable) { 
-        /*
-        val ppnVec = Reg(Vec(cacheLineSize,UInt(PPN_WIDTH.W)))
-        // Spit PTE entries and extract PPN
+    .elsewhen (stateReg===fill) { 
+        // Spit PPNs. SOS!!!!!!!!: We need the PTE entries and then extract the PPN. See IO comments!!!!!!
         for (i<-0 until cacheLineSize){
-            ppnVec.updated(i,getPPNfromPA(io.writeAddress(i*pMemAddressWidth+pMemAddressWidth-1,i*pMemAddressWidth)))
+            //cacheLineRegs.updated(i,getPPNfromPA(io.writeAddress.bits(i*pMemAddressWidth+pMemAddressWidth-1,i*pMemAddressWidth)))
+            cacheLineRegs.updated(i,io.writeAddress.bits(i*ppn_width+ppn_width-1,i*ppn_width))
         }
         // At this point we have to check if reqVPN, reqVPN+1,..., correspond to consecutive PPNs
-        // To do so we must traslate each VPN seperately
-        */
+        // To do so we must traslate each VPN seperately (??????)
         
+        
+        /*
         // ======= This is a NOOB write implementation just to test reads =======
-        //var idx=randomUInt(tlbSize)
-        //coltEntriesRegs(io.writeData)= io.writeAddress
-        //coltEntriesRegs.updated(idx, io.writeAddress)
-        //printf(s"Address ${io.writeAddress} was written. Index=$idx\n")
-        // ============= END OF NOOB IMPLEMENTATION =============================
-        
-        io.retAddress := previousRetAddressReg
-        io.validData:= false.B
+        var idx=randomUInt(tlbSize)
+        coltEntriesRegs(io.writeData)= io.writeAddress
+        coltEntriesRegs.updated(idx, io.writeAddress)
+        printf(s"Address ${io.writeAddress} was written. Index=$idx\n")
+         ============= END OF NOOB IMPLEMENTATION =============================
+        */
+
+        io.retAddress.bits := 0.U
+        io.retAddress.valid:= true.B
     }
-    .otherwise { 
-        io.retAddress:=previousRetAddressReg
-        io.validData:=false.B
+    .otherwise{ 
+        printf("======== Entered idle mode ========\n")
+        io.retAddress.bits:=previousRetAddressReg
+        //io.retAddress.valid:=false.B
+        io.retAddress.valid:=previousRetValid
     }
-    io.retData:= 0.U
 
     def randomUInt(upperLimit: Int)= scala.util.Random.nextInt(upperLimit).U
 
