@@ -62,7 +62,7 @@ class CoLT_FA () extends Module {
     val operationDone = WireDefault(false.B) 
     val cacheLineRegs = Reg(Vec(cacheLineSize,UInt(ppn_width.W)))
     val isCoalescable = WireDefault(false.B)
-    val coalLength = RegInit(0.U(log2Ceil(coalBits).W))
+    val coalLength = RegInit(0.U(log2Ceil(coalBits).W))rrrW
 
     //printf("VpnWidth=%d PPNWidth=%d PageOffset=%d\n",vpn_width.U,ppn_width.U,pageOffset.U)
 
