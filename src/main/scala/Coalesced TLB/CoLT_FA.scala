@@ -15,7 +15,7 @@ class CoLT_FA () extends Module {
     val pMemAddressWidth = log2Ceil(pMemSize)
     val vMemSize = 8192
     val vMemAddressWidth: Int = log2Ceil(vMemSize)
-    val cacheLineSize = 8 // Number of pages to be fetched from a PTW
+    //val cacheLineSize = 8 // Number of pages to be fetched from a PTW
     val ptSize = 128  // entries
     val pageSize = 32 //bits
     val pageOffset = log2Ceil(pageSize)
@@ -25,10 +25,11 @@ class CoLT_FA () extends Module {
     val attrBits = 3
     val vpn_width=vMemAddressWidth - pageOffset
     val ppn_width=pMemAddressWidth - pageOffset
-    val tlbEntryWidth = vpn_width + coalBits + attrBits + ppn_width
+    val regTLBentryWidth = vpn_width + ppn_width
+    val coltEntryWidth = vpn_width + coalBits + attrBits + ppn_width
     // ========= CoLT-FA TLB entry structure =========
     // BaseVPN [vMemAddressWidth - pageOffset] | CoalLength[coalBits] | Attributes [attrBits] | Base PPN [pMemAddressWidth - pageOffset]
-    val vpn_tlb_start        =tlbEntryWidth-1
+    val vpn_tlb_start        =coltEntryWidth-1
     val vpn_tlb_end          =vpn_tlb_start-vpn_width+1
     val coal_length_start    =vpn_tlb_end-1
     val coal_length_end      =coal_length_start-coalBits+1
@@ -47,229 +48,309 @@ class CoLT_FA () extends Module {
         val writeAddress = Flipped(Decoupled(Input (UInt((ppn_width).W)))) // SOS!!!!! The incoming write requests are PTEs, not PPNs!
         val writeEnable = Input(Bool())
 
+        val fence_request = Input(Bool())
+        val fenceAddress = Flipped(Valid(Input(UInt(vpn_width.W))))
+
         val retAddress = Decoupled(Output(UInt(ppn_width.W))) //Returns the desired PPN      
     })
     
     val previousRetAddressReg = RegNext(io.retAddress.bits, 0.U(ppn_width.W))
     val previousRetValid = RegNext (io.retAddress.valid, false.B)
-    val reqVPN=WireDefault(0.U(vpn_width.W))
+    val reqVPN=RegInit(0.U(vpn_width.W))
     val resultIndex = WireDefault(0.U(log2Ceil(tlbSize).W))
-    val pteCounter = RegInit(0.U(log2Ceil(cacheLineSize).W))
     var pteIntCounter = 0
     val tlbHit = WireDefault(false.B)
     val ptwDone = WireDefault(false.B)
     val writeDone = WireDefault(false.B)
     val operationDone = WireDefault(false.B) 
-    val cacheLineRegs = Reg(Vec(cacheLineSize,UInt(ppn_width.W)))
     val isCoalescable = WireDefault(false.B)
-    val coalLength = RegInit(0.U(log2Ceil(coalBits).W))rrrW
+    val coalLength = RegInit(0.U(log2Ceil(coalBits).W))
+    val reqPPN = RegInit(0.U(ppn_width.W))
 
     //printf("VpnWidth=%d PPNWidth=%d PageOffset=%d\n",vpn_width.U,ppn_width.U,pageOffset.U)
 
     // FSM Logic
-    val idle :: lookup :: waitPTW :: fill :: Nil = Enum (4)
+    val idle :: lookup :: waitPTW :: fill :: invalidate :: Nil = Enum (5)
     val stateReg = RegInit(idle)
+    val previousStateReg = RegInit(idle)
     switch (stateReg){
         is (idle){
-            when (io.readEnable ) { stateReg:= lookup}
-            .elsewhen(io.writeEnable ) {stateReg := fill}
+            when (io.fence_request){
+                previousRetAddressReg := stateReg
+                stateReg:=invalidate
+            }.elsewhen(io.writeEnable) {
+                stateReg := fill
+            }.elsewhen (io.readEnable) { 
+                stateReg:= lookup
+            }
         }
         is (lookup){
             when (!operationDone) {stateReg := waitPTW}
             .elsewhen(operationDone) { stateReg := idle }
         }
         is (waitPTW){
-            when(ptwDone) { 
-                //pteCounter:=0.U
+            when (io.fence_request){
+                previousRetAddressReg := stateReg
+                stateReg:=invalidate
+            }.elsewhen(ptwDone) { 
                 stateReg := fill
             }
         }
         is (fill){
             when (operationDone) {stateReg:=idle}
+            // Fence request cannot be operated during fill mode. A case scenario is when the fence request address is the same as the VPN/PPN to be filled.
+        }
+        is (invalidate){
+            // todo
+
+            // when the request is served
+                stateReg := previousStateReg
         }
     }
     
-    //val coltEntriesRegs = RegInit(VecInit(Seq.fill(tlbSize)(0.U(tlbEntryWidth.W))))
-    val coltEntriesRegs = RegInit(VecInit(2758715.U(tlbEntryWidth.W), // VPN=168 CoalLength=3 PPN=59
-                                          755731.U(tlbEntryWidth.W), // VPN=46 CoalLength=1 PPN=19
-                                          3471468.U(tlbEntryWidth.W), // VPN=211 CoalLength=7 PPN=108
-                                          0.U(tlbEntryWidth.W),
-                                          2228302.U(tlbEntryWidth.W), // VPN=136 CoalLength=0 PPN=78
-                                          0.U(tlbEntryWidth.W),
-                                          0.U(tlbEntryWidth.W),
-                                          0.U(tlbEntryWidth.W)))
-    val validRegs = RegInit(VecInit(true.B,true.B,true.B,false.B,true.B,false.B,false.B,false.B))
+    val regularTLBentries = RegInit(VecInit(Seq.fill(tlbSize)(0.U(regTLBentryWidth.W))))
+    val regularValidRegs = RegInit(VecInit(false.B,false.B,false.B,false.B,false.B,false.B,false.B,false.B))
+
+    val coltEntriesRegs = RegInit(VecInit(2758715.U(coltEntryWidth.W), // VPN=168 CoalLength=3 PPN=59
+                                          755731.U(coltEntryWidth.W), // VPN=46 CoalLength=1 PPN=19
+                                          3471468.U(coltEntryWidth.W), // VPN=211 CoalLength=7 PPN=108
+                                          0.U(coltEntryWidth.W),
+                                          2228302.U(coltEntryWidth.W), // VPN=136 CoalLength=0 PPN=78
+                                          0.U(coltEntryWidth.W),
+                                          0.U(coltEntryWidth.W),
+                                          0.U(coltEntryWidth.W)))
+    val coltValidRegs = RegInit(VecInit(true.B,true.B,true.B,false.B,true.B,false.B,false.B,false.B))
     io.readAddress.ready := stateReg === idle  
     io.writeAddress.ready:= stateReg === idle || stateReg===waitPTW
-    io.retAddress.valid := tlbHit && validRegs(resultIndex) || writeDone // add another flag for write-returned (PTW) values
+    io.retAddress.valid := tlbHit && coltValidRegs(resultIndex) || writeDone // add another flag for write-returned (PTW) values
     
-    operationDone := tlbHit && validRegs(resultIndex) || writeDone
+    operationDone := tlbHit && coltValidRegs(resultIndex) || writeDone
     val ptwCycleCounter = RegInit(0.U(2.W))
+    val coltMaskHit = WireDefault(false.B)
+    val regularMaskHit = WireDefault(false.B)
+    val coltMaskHitIndex = WireDefault(0.U(log2Ceil(tlbSize).W))
+    val regularMaskHitIndex = WireDefault(0.U(log2Ceil(tlbSize).W))
+    val regularHitEntry = WireDefault(0.U(regTLBentryWidth.W))
+    val coltHitEntry = WireDefault(0.U(coltEntryWidth.W))
+    val vpnHit = WireDefault(false.B)
+    val invalidateIndex = WireDefault(0.U(ppn_width.W))
     ptwCycleCounter := Mux(stateReg===waitPTW && io.writeEnable && io.writeAddress.valid, Mux(ptwCycleCounter===1.U, 0.U, ptwCycleCounter+1.U), 0.U)
-    pteCounter:= Mux(ptwDone, 0.U, Mux(ptwCycleCounter===1.U, pteCounter+1.U, pteCounter))
-    
-    ptwDone := (pteCounter === (cacheLineSize.U -1.U)) && ptwCycleCounter===1.U
+    ptwDone := ptwCycleCounter===1.U
 
-    //val diffVec2=diffVec.toVector
-    /*
-    var basePPN = new ListBuffer[UInt]()
-    val coalLengthList = new ListBuffer[UInt]()
-    val targetIndexList = new ListBuffer[UInt]()
-    val targetEntriesList = new ListBuffer[UInt]()
-    */
-    val basePPN = VecInit(Seq.fill(cacheLineSize-1)(0.U(ppn_width.W)))
-    val coalLengthList = VecInit(Seq.fill(cacheLineSize-1)(0.U(coalBits.W)))
-    val isBasePPN = VecInit(Seq.fill(cacheLineSize)(false.B))
-    val isEntryEnd = VecInit(Seq.fill(cacheLineSize)(false.B))
-    val targetIndexList = VecInit(Seq.fill(cacheLineSize-1)(false.B))
-    val targetEntriesList = VecInit(Seq.fill(cacheLineSize-1)(0.U(ppn_width.W)))
-    var tempCoalCounter = WireDefault(0.U(coalBits.W))
-    var previousPPN = WireDefault(0.U(ppn_width.W))
-    //var previousPPN = RegInit(0.U(ppn_width.W))
-
+   
     when (stateReg===lookup) {
         printf("======== Entered lookup mode ========\n")
         reqVPN := getVPNfromVA(io.readAddress.bits)
-        printf("\t reqVPN=%d\n", reqVPN)
+        printf("\t reqVPN=%d (this is the previous request but it doesn't really affect the operation)\n", reqVPN)
+        printf ("\t Actually requested VPN=%d\n", getVPNfromVA(io.readAddress.bits))
+
         //=================== Range check logic ===================
         tlbHit := coltEntriesRegs.exists{      
             case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
                       (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
         }
-        printf("\t tlbHit=%d\n", tlbHit)  // "tlbHit" is set if the requested address matches the range check logic
+        when (tlbHit){
+            printf("\t tlbHit=%d\n", tlbHit)  // "tlbHit" is set if the requested address matches the range check logic
                 
-        resultIndex := coltEntriesRegs.indexWhere {
-            case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
-            (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
-        }
-        printf("\t resultIndex=%d\n", resultIndex)  // "resultIndex" stores the index of the TLB entry that matched the request
-                        
-        //=================== PPN Generation Logic ===================
-        val finalRes = getVPNfromVA(io.readAddress.bits) - getVPNfromTLB(coltEntriesRegs(resultIndex)) + getPPNfromTLB(coltEntriesRegs(resultIndex))
-        printf("\t Final result: %d \n", finalRes)
-        printf("\t operationDone=%d\n", operationDone)
+            resultIndex := coltEntriesRegs.indexWhere {
+                case x => (getVPNfromTLB(x) <= getVPNfromVA(io.readAddress.bits)) && 
+                (getVPNfromVA(io.readAddress.bits)<= getVPNfromTLB(x) + getCoalLengthFromTLB(x))
+            }
+            printf("\t resultIndex=%d\n", resultIndex)  // "resultIndex" stores the index of the TLB entry that matched the request
+                            
+            //=================== PPN Generation Logic ===================
+            val finalRes = getVPNfromVA(io.readAddress.bits) - getVPNfromTLB(coltEntriesRegs(resultIndex)) + getPPNfromTLB(coltEntriesRegs(resultIndex))
+            printf("\t Final result: %d \n", finalRes)
+            printf("\t operationDone=%d\n", operationDone)
 
-        // Update-return operations
-        io.retAddress.bits := Mux(tlbHit && validRegs(resultIndex), finalRes, previousRetAddressReg)
-        printf("\t valid=%d\n", io.retAddress.valid)
+            // Update-return operations
+            io.retAddress.bits := Mux(tlbHit && coltValidRegs(resultIndex), finalRes, previousRetAddressReg)
+        
+            printf("\t valid=%d\n", io.retAddress.valid)
+        }.otherwise{ 
+            printf("\t **** CoLT TLB miss ****\n")
+            io.retAddress.bits := previousRetAddressReg
+        }
+        
     }
     .elsewhen(stateReg===waitPTW){
         printf("======== Entered waitPTW mode ========\n")
-        // Fill the cacheLineRegs (consecutive PTEs) Vector
+
         when (io.writeAddress.valid && io.writeEnable){
-            cacheLineRegs(pteCounter) := io.writeAddress.bits
+            reqPPN := io.writeAddress.bits
+            io.retAddress.bits := reqPPN
+            io.retAddress.valid:= true.B
+            when (ptwCycleCounter===1.U){
+                printf("\tPPN %d on write port\n", io.writeAddress.bits)
+                printf("\tRequested translation is VPN%d => PPN%d \n", reqVPN, reqPPN)
+            }
+        }.otherwise{
+            io.retAddress.bits := previousRetAddressReg
+            io.retAddress.valid:= false.B
         }
-        when (ptwCycleCounter===1.U){
-            printf("\tPPN %d on write port\n", io.writeAddress.bits)
-            printf("\tEntry %d is %d \n", pteCounter,cacheLineRegs(pteCounter))
-        }
-        
-        io.retAddress.bits := previousRetAddressReg
-        io.retAddress.valid:= false.B
     }
     .elsewhen (stateReg===fill) { 
         printf("======== Entered fill mode ========\n")
+        //coltMaskHit := (coltEntriesRegs zip coltValidRegs).toVector.exists{case (entry, flag) => flag && vmaskTLB(entry)===vmask(reqVPN) && pmaskTLB(entry)===pmask(reqPPN) }
         
-        for (i<-0 until cacheLineSize-1){
-            when (cacheLineRegs(i+1)-cacheLineRegs(i)===1.U){
-                targetEntriesList(i) := cacheLineRegs(i)
-                targetIndexList(i) := true.B
-            }
-        }
-
-        when (targetIndexList(0)) {
-            isBasePPN(0) := true.B
-        }
-
-        for (i<-1 until cacheLineSize-1){
-            when (!targetIndexList(i) && targetIndexList(i-1)){
-                // End of current coalesced entry at i-1. Find the coalescing length.
-                isEntryEnd(i) := true.B
-            }.elsewhen(targetIndexList(i) && !targetIndexList(i-1)){
-                // New Base PPN was found at i
-                isBasePPN(i) := true.B
-                when (i.U===cacheLineSize.U-2.U){
-                    isBasePPN(i) := true.B
-                    isEntryEnd(i+1) := true.B
-                }
-            }.elsewhen(targetIndexList(i) && targetIndexList(i-1)){
-                // Increase the coalescing length counter
-                when (i.U===(cacheLineSize.U-2.U)){
-                    isEntryEnd(i+1) := true.B
-                }
-            }
-        }
-/*
-
-        when (targetIndexList(0)) {
-            basePPN(0):= targetEntriesList(0)
-            previousPPN:= targetEntriesList(0)
-            isBasePPN(0) := true.B
-        }
-        printf("Before for loop:\n")
-        for (i<-0 until cacheLineSize-1){
-            printf("TargetEntry(%d)=%d \n",i.U,targetEntriesList(i))
-        }
-
-        printf("Before for loop: previousPPN=%d \n", previousPPN)
+        coltMaskHitIndex := coltEntriesRegs.indexWhere(entry=> vmaskTLB(entry)===vmask(reqVPN) && pmaskTLB(entry)===pmask(reqPPN))
+        coltMaskHit := coltValidRegs(coltMaskHitIndex) && coltEntriesRegs.exists(entry => vmaskTLB(entry)===vmask(reqVPN) && pmaskTLB(entry)===pmask(reqPPN))
         
-        for (i<-1 until cacheLineSize-1){
-            //printf("target Entry%d =%d\n",i.U,targetEntriesList(i))
-            when (!targetIndexList(i) && targetIndexList(i-1)){
-                // End of current coalesced entry at i-1. Find the coalescing length.
-                printf("First when says: i=%d, target entry=%d, previousPPN=%d \n",i.U,targetEntriesList(i-1), previousPPN)
-                coalLengthList(i-1) := 1.U + targetEntriesList(i-1) - previousPPN
-                isEntryEnd(i) := true.B
-            }.elsewhen(targetIndexList(i) && !targetIndexList(i-1)){
-                printf("Second when says (before execution): i=%d, target entry=%d, previousPPN=%d \n",i.U,targetEntriesList(i-1), previousPPN)
-                // New Base PPN was found at i
-                basePPN(i) := targetEntriesList(i)
-                previousPPN := targetEntriesList(i)
-                isBasePPN(i) := true.B
-                //tempCoalCounter := 0.U
-                when (i.U===cacheLineSize.U-2.U){
-                    coalLengthList(i):=1.U
-                    isBasePPN(i) := true.B
-                    isEntryEnd(i+1) := true.B
+        regularMaskHitIndex:=regularTLBentries.indexWhere(entry=> vmask(entry(vpn_width+ppn_width-1,ppn_width))===vmask(reqVPN) && vmask(entry(ppn_width-1,0))===pmask(reqPPN))
+        regularMaskHit := regularValidRegs(regularMaskHitIndex) && regularTLBentries.exists(entry=> vmask(entry(vpn_width+ppn_width-1,ppn_width))===vmask(reqVPN) && vmask(entry(ppn_width-1,0))===pmask(reqPPN))
+
+        printf(" coltMaskHit=%d\n coltMaskHitIndex=%d\n regularMaskHit=%d\n regularMaskHitIndex=%d\n",coltMaskHit,coltMaskHitIndex,regularMaskHit,regularMaskHitIndex)
+
+
+        /*
+        when (!coltMaskHit){
+            when (!regularMaskHit){
+                // Fill the conventional TLB
+                // TODO: also check valid bit 
+                printf("No mask match for VPN%d\n", reqVPN)
+                val idx=randomUInt(tlbSize)
+                regularTLBentries(idx) := Cat(reqVPN,reqPPN)
+                regularValidRegs(idx) := true.B
+            }.otherwise{
+                //Coalescing possibility. Check the ***** conventional TLB ***** entries using the offsets
+                // TODO: Multiple mask hits in the conventional TLB.
+                regularMaskHitIndex:=regularTLBentries.indexWhere(entry=> vmask(entry(vpn_width+ppn_width-1,ppn_width))===vmask(reqVPN) && vmask(entry(ppn_width-1,0))===pmask(reqPPN))
+                regularHitEntry := regularTLBentries(regularMaskHitIndex)
+                
+                val idx2=randomUInt(tlbSize)
+                printf("VPN%d mask matched in the conventional TLB\n Place it in CoLT with index=%d", reqVPN, idx2)
+
+                when (voffset(reqVPN)-voffset(regularMaskHitIndex)===1.U && poffset(reqVPN)-poffset(regularMaskHitIndex)===1.U){
+                    // Offset match. Fill CoLT TLB with a new entry
+                    printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx2, reqVPN, reqPPN)
+                    coltEntriesRegs(idx2) := Cat(reqVPN,1.U(coalBits.W), 0.U(attrBits.W), reqPPN)
+                    coltValidRegs(idx2) := true.B
+                    regularValidRegs (regularMaskHitIndex) := false.B
+                }.elsewhen(voffset(regularMaskHitIndex)-voffset(reqVPN)===1.U && poffset(regularMaskHitIndex)-poffset(reqVPN)===1.U){
+                    printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx2, regularHitEntry(vpn_width+ppn_width-1,ppn_width), regularHitEntry(ppn_width-1,0))
+                    coltEntriesRegs(idx2) := Cat(regularHitEntry(vpn_width+ppn_width-1,ppn_width), 1.U(coalBits.W), 0.U(attrBits.W), regularHitEntry(ppn_width-1,0))
+                    coltValidRegs(idx2) := true.B
+                    regularValidRegs (regularMaskHitIndex) := false.B
                 }
-                printf("Second when says (after execution): i=%d, target entry=%d, previousPPN=%d \n",i.U,targetEntriesList(i-1), previousPPN)
-            }.elsewhen(targetIndexList(i) && targetIndexList(i-1)){
-                // Increase the coalescing length counter
-                //tempCoalCounter := tempCoalCounter + 1.U
-                printf("Third when says (before execution): i=%d, target entry=%d, previousPPN=%d \n",i.U,targetEntriesList(i-1), previousPPN)
-                when (i.U===(cacheLineSize.U-2.U)){
-                    coalLengthList(i):=targetEntriesList(i)-previousPPN + 1.U
-                    isEntryEnd(i+1) := true.B
-                    printf("Got here\n")
-                }
-                printf("Third when says (after execution): i=%d, target entry=%d, previousPPN=%d \n",i.U,targetEntriesList(i-1), previousPPN)
             }
-           // printf("i=%d previousPPN=%d\n",i.U,previousPPN)
+        }.otherwise{
+            when (!regularMaskHit){
+                
+                // Coalescing possibility. Check the ***** CoLT TLB ***** entries
+                // TODO: Multiple mask hits in the CoLT TLB.
+                coltMaskHitIndex := coltEntriesRegs.indexWhere(entry=> vmaskTLB(entry)===vmask(reqVPN) && pmaskTLB(entry)===pmask(reqPPN))
+                coltHitEntry := coltEntriesRegs(coltMaskHitIndex)
+                val idx3=randomUInt(tlbSize)
+                
+                when (voffset(reqVPN)- voffset(getVPNfromTLB(coltHitEntry)) === 1.U && poffset(reqVPN)-poffset(getVPNfromTLB(coltHitEntry))=== 1.U){
+                    // Requested VPN is the new Base VPN in the entry (so is the PPN). Also increase the Coalescing Length by 1
+                    printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx3, reqVPN, reqPPN)
+                    coltEntriesRegs(coltMaskHit):= Cat(reqVPN, getCoalLengthFromTLB(coltHitEntry) + 1.U, getAttrFromTLB(coltHitEntry), reqPPN)
+                    coltValidRegs(coltMaskHitIndex) := true.B //probably useless. valid bit is already set
+                }.elsewhen(voffset(reqVPN) === voffset(getVPNfromTLB(coltHitEntry)) + getCoalLengthFromTLB(coltHitEntry) + 1.U && 
+                        poffset(reqPPN) === poffset(getPPNfromTLB(coltHitEntry)) + getCoalLengthFromTLB(coltHitEntry) + 1.U){
+                    // Requested VPN is just after the last entry (current Base VPN + current coal length + 1)
+                    printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx3, getVPNfromTLB(coltHitEntry), getPPNfromTLB(coltHitEntry))
+                    coltEntriesRegs(coltMaskHit) := Cat (getVPNfromTLB(coltHitEntry), getCoalLengthFromTLB(coltHitEntry) + 1.U, getAttrFromTLB(coltHitEntry), getPPNfromTLB(coltHitEntry))
+                    coltValidRegs(coltMaskHitIndex) := true.B
+                }
+            }.otherwise{
+
+                printf("Mask match in both TLBs.")
+                printf("New CoLT entry at index (???)\n BaseVPN:%d BasePPN%d\n",  getVPNfromTLB(coltHitEntry), getPPNfromTLB(coltHitEntry))
+            }
         }
-        //printf("Before for loop: previousPPN=%d \n", previousPPN)
-        for (i<-0 until cacheLineSize-1){
-            printf("Entry%d: Base PPN =%d, Coal Length=%d\n",i.U,basePPN(i),coalLengthList(i))
-            printf ("Target Index %d \n", targetIndexList(i))
-        }
-*/
-        printf("\n===== Results =====\n")
-        for (i<-0 until cacheLineSize){
-            printf("Entry%d (PPN=%d): isEntryEnd=%d isBasePPN=%d\n",i.U,cacheLineRegs(i), isEntryEnd(i), isBasePPN(i))
+*/        
+        when (!regularMaskHit && !coltMaskHit){     // No mask match - Fill the conventional TLB
+            // Fill the conventional TLB
+            // TODO: also check valid bit 
+            printf("No mask match for VPN%d\n", reqVPN)
+            var idx=randomUInt(tlbSize)
+            printf("New conventional entry at index%d\n", idx)
+            regularTLBentries(idx) := Cat(reqVPN,reqPPN)
+            regularValidRegs(idx) := true.B            
+        }.elsewhen(regularMaskHit && regularValidRegs(regularMaskHitIndex) && !coltMaskHit){  //Coalescing possibility. Check the ***** conventional TLB ***** entries using the offsets
+            // TODO: Multiple mask hits in the conventional TLB.
+            regularHitEntry := regularTLBentries(regularMaskHitIndex)
+            var idx2=randomUInt(tlbSize)
+            printf("VPN%d mask matched in the conventional TLB\nPlace it in CoLT with index=%d\n", reqVPN, idx2)
+
+            when (voffset(reqVPN)-voffset(regularMaskHitIndex)===1.U && poffset(reqVPN)-poffset(regularMaskHitIndex)===1.U){
+                // Offset match. Fill CoLT TLB with a new entry
+                printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx2, regularHitEntry(vpn_width+ppn_width-1,ppn_width), regularHitEntry(ppn_width-1,0))
+                coltEntriesRegs(idx2) := Cat(regularHitEntry(vpn_width+ppn_width-1,ppn_width), 1.U(coalBits.W), 0.U(attrBits.W), regularHitEntry(ppn_width-1,0))
+                coltValidRegs(idx2) := true.B
+                regularValidRegs (regularMaskHitIndex) := false.B
+            }.elsewhen(voffset(regularMaskHitIndex)-voffset(reqVPN)===1.U && poffset(regularMaskHitIndex)-poffset(reqVPN)===1.U){
+                printf("New CoLT entry at index%d\n BaseVPN:%d BasePPN%d\n", idx2, reqVPN, reqPPN)
+                coltEntriesRegs(idx2) := Cat(reqVPN,1.U(coalBits.W), 0.U(attrBits.W), reqPPN)
+                coltValidRegs(idx2) := true.B
+                regularValidRegs (regularMaskHitIndex) := false.B
+            }
+            
+        }.elsewhen(!regularMaskHit && coltMaskHit && coltValidRegs(coltMaskHitIndex)){
+            // Coalescing possibility. Check the ***** CoLT TLB ***** entries
+            // TODO: Multiple mask hits in the CoLT TLB.
+            coltHitEntry := coltEntriesRegs(coltMaskHitIndex)
+
+            var idx3=randomUInt(tlbSize)
+            when (voffset(getVPNfromTLB(coltHitEntry)) === voffset(reqVPN) + 1.U && poffset(getVPNfromTLB(coltHitEntry))=== poffset(reqVPN) + 1.U){
+                // Requested VPN is the new Base VPN in the entry (so is the PPN). Also increase the Coalescing Length by 1
+                printf("Update CoLT entry at index%d\n BaseVPN:%d BasePPN%d new Coalesing Length=%d\n", idx3, reqVPN, reqPPN, getCoalLengthFromTLB(coltHitEntry) + 1.U)
+                coltEntriesRegs(coltMaskHit):= Cat(reqVPN, getCoalLengthFromTLB(coltHitEntry) + 1.U, getAttrFromTLB(coltHitEntry), reqPPN)
+                coltValidRegs(coltMaskHitIndex) := true.B //probably useless. valid bit is already set
+
+
+            }.elsewhen(voffset(reqVPN) === voffset(getVPNfromTLB(coltHitEntry)) + getCoalLengthFromTLB(coltHitEntry) + 1.U && 
+                    poffset(reqPPN) === poffset(getPPNfromTLB(coltHitEntry)) + getCoalLengthFromTLB(coltHitEntry) + 1.U){
+                // Requested VPN is just after the last entry (current Base VPN + current coal length + 1)
+                printf("Update CoLT entry at index%d\n BaseVPN:%d BasePPN%d new Coalesing Length=%d\n", idx3, reqVPN, reqPPN, getCoalLengthFromTLB(coltHitEntry) + 1.U)
+                coltEntriesRegs(coltMaskHit) := Cat (getVPNfromTLB(coltHitEntry), getCoalLengthFromTLB(coltHitEntry) + 1.U, getAttrFromTLB(coltHitEntry), getPPNfromTLB(coltHitEntry))
+                coltValidRegs(coltMaskHitIndex) := true.B
+            
+            }
+            
+
+        }.elsewhen(regularMaskHit && coltMaskHit && regularValidRegs(regularMaskHitIndex) && coltValidRegs(coltMaskHitIndex)){
+            // Mask matching in both TLBs ????
+            printf("Mask match in both TLBs.")
+            printf("New CoLT entry at index (???)\n BaseVPN:%d BasePPN%d\n",  getVPNfromTLB(coltHitEntry), getPPNfromTLB(coltHitEntry))
         }
 
-        //writeDone:=true.B
+
         io.retAddress.bits := previousRetAddressReg
-        io.retAddress.valid:= true.B
+        io.retAddress.valid:= previousRetValid
+        operationDone:=true.B
+    }.elsewhen(stateReg===invalidate){
+        // TODO
+        invalidateIndex := coltEntriesRegs.indexWhere(entry => getVPNfromTLB(entry) === io.fenceAddress.bits)
+        coltValidRegs (invalidateIndex) := false.B
+
+        io.retAddress.bits:=previousRetAddressReg
+        io.retAddress.valid:=previousRetValid
     }
     .otherwise{ 
         printf("======== Entered idle mode ========\n")
+
+        printf(" *** CoLT entries *** \n")
+        for (i<-0 until tlbSize){
+            printf("Valid=%d Base VPN=%d, Base PPN=%d, Coalescing Length=%d\n", coltValidRegs(i), getVPNfromTLB(coltEntriesRegs(i)), getPPNfromTLB(coltEntriesRegs(i)), getCoalLengthFromTLB((coltEntriesRegs(i))))
+        }
+
+        for (i<-0 until tlbSize){
+           // printf("Valid=%d VPN=%d, PPN=%d", regularValidRegs(i), )
+        }
+
         io.retAddress.bits:=previousRetAddressReg
         io.retAddress.valid:=previousRetValid
     }
 
 
-    def vmask (entry: UInt): UInt= {entry(vpn_width-1,coalBits)}
-    def pmask (entry: UInt): UInt= {entry(ppn_width-1,coalBits)}
+    def vmask (entry: UInt): UInt= {entry(vpn_width-1,coalBits) }
+    def pmask (entry: UInt): UInt= {entry(ppn_width-1,coalBits) }
+    def vmaskTLB (entry: UInt): UInt= {vmask(getVPNfromTLB(entry)) }
+    def pmaskTLB (entry: UInt): UInt= {pmask(getPPNfromTLB(entry))}
+
     def voffset (entry: UInt): UInt= {entry(coalBits-1,0)}
     def poffset (entry: UInt): UInt= {entry(coalBits-1,0)}
 
