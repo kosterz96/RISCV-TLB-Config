@@ -12,7 +12,7 @@ class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
       test (new CoLT_FA()) { c => 
       
       c.io.readEnable.poke(true.B)
-      c.io.readAddress.bits.poke(5376.U)
+      c.io.readAddress.bits.poke(168.U)
       c.io.readAddress.valid.poke(true.B)
       c.io.retAddress.ready.poke(true.B)
       c.clock.step(2)
@@ -21,7 +21,7 @@ class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
 
           
       c.io.readEnable.poke(true.B)
-      c.io.readAddress.bits.poke(5440.U)
+      c.io.readAddress.bits.poke(170.U)
       c.io.readAddress.valid.poke(true.B)
       c.io.retAddress.ready.poke(true.B)
       c.clock.step(2)
@@ -30,61 +30,32 @@ class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
       
       
       c.io.readEnable.poke(true.B)
-      c.io.readAddress.bits.poke(6752.U)
+      c.io.readAddress.bits.poke(211.U)
       c.io.readAddress.valid.poke(true.B)
       c.io.retAddress.ready.poke(true.B)
       c.clock.step(2)
       c.io.retAddress.valid.expect(true.B)
       c.io.retAddress.bits.expect(108.U)   
 
-      
       //Test write after TLB Miss
-      c.io.readEnable.poke(true.B)
-      c.io.readAddress.bits.poke(99999.U)
-      c.io.readAddress.valid.poke(true.B)
-      c.io.retAddress.ready.poke(true.B)
-      c.clock.step(2)
-      c.io.retAddress.valid.expect(false.B)
-      c.io.retAddress.bits.expect(108.U) //miss
+      val readSeq = Seq(55,56,57,60,61,128,129,145,219)
+      val writeSeq = Seq(4,5,6,8,9,10,11,54,60) // PTW result
+      for (i<-0 until readSeq.length){
+        c.io.writeEnable.poke(false.B)       
+        c.io.readEnable.poke(true.B)
+        c.io.readAddress.bits.poke(readSeq(i).U)
+        c.io.readAddress.valid.poke(true.B)
+        c.io.retAddress.ready.poke(true.B)
+        c.clock.step(2)
 
-      c.io.writeEnable.poke(false.B)
-      c.io.writeAddress.bits.poke(5.U)
-      c.io.writeAddress.valid.poke(true.B)
-      c.clock.step()
-      
-      val writeSeq = Seq(4,5,6,8,9,10,11,54)
-      for (i<-0 until 8){
         c.io.writeEnable.poke(true.B)
         c.io.writeAddress.bits.poke(writeSeq(i).U)
         c.io.writeAddress.valid.poke(true.B)
-        c.clock.step(2)
+        c.clock.step(4)
+
+        c.io.retAddress.bits.expect(writeSeq(i).U)
       }
-      c.io.retAddress.bits.expect(108.U)
-      /*
-      
-      c.io.writeEnable.poke(true.B)
-      c.io.writeAddress.bits.poke(4.U)
-      c.io.writeAddress.valid.poke(true.B)
-      c.clock.step(2)
 
-      c.io.writeEnable.poke(true.B)
-      c.io.writeAddress.bits.poke(5.U)
-      c.io.writeAddress.valid.poke(true.B)
-      c.clock.step(2)
-
-      c.io.writeEnable.poke(true.B)
-      c.io.writeAddress.bits.poke(6.U)
-      c.io.writeAddress.valid.poke(true.B)
-      c.clock.step(2)
-
-      c.io.writeEnable.poke(true.B)
-      c.io.writeAddress.bits.poke(9.U)
-      c.io.writeAddress.valid.poke(true.B)
-      c.clock.step(2)
-      */
-      
-
-      //c.clock.step(10)
       println("Success!")
       }
   }
