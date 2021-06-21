@@ -38,8 +38,8 @@ class CoLT_FA_test extends FreeSpec with ChiselScalatestTester{
       c.io.retAddress.bits.expect(108.U)   
 
       //Test write after TLB Miss
-      val readSeq = Seq(55,56,57,60,61,128,129,145,219)
-      val writeSeq = Seq(4,5,6,8,9,10,11,54,60) // PTW result
+      val readSeq =   Seq(55,  56, 57,  60,  61,  128,  129,  145,  219)  // request VPN
+      val writeSeq =  Seq(4,    5,  6,   8,   9,   10,   11,   54,  116) // PTW result - PPNs
       for (i<-0 until readSeq.length){
         c.io.writeEnable.poke(false.B)       
         c.io.readEnable.poke(true.B)

@@ -204,11 +204,14 @@ class CoLT_FA () extends Module {
         neighborVPNHitWay := coltEntriesRegs.indexWhere(entry => getVPNfromTLB(entry) + getCoalLengthFromTLB(entry) + 1.U === reqVPN && getCoalLengthFromTLB(entry) + 1.U <= math.pow(2,coalBits).toInt.U - 1.U)
         neighborVPNHit := coltValidRegs(neighborVPNHitWay) && coltEntriesRegs.exists(entry => getVPNfromTLB(entry) + getCoalLengthFromTLB(entry) + 1.U === reqVPN && getCoalLengthFromTLB(entry) + 1.U <= math.pow(2,coalBits).toInt.U - 1.U)
         
-        printf("Neighbor PPN Hit (%d) at way %d\n",neighborPPNHit, neighborPPNHitWay)
-        printf("Neighbor VPN Hit (%d) at way %d\n",neighborVPNHit, neighborVPNHitWay)
+        val cBitsOverflow = getCoalLengthFromTLB(coltEntriesRegs(neighborPPNHitWay)) === math.pow(2,coalBits).toInt.U - 1.U
+
+        printf("Neighbor PPN Hit (%d) at way %d with %d Coalescing length\n",neighborPPNHit, neighborPPNHitWay, getCoalLengthFromTLB(coltEntriesRegs(neighborPPNHitWay)))
+        printf("Neighbor VPN Hit (%d) at way %d with %d Coalescing length\n",neighborVPNHit, neighborVPNHitWay, getCoalLengthFromTLB(coltEntriesRegs(neighborVPNHitWay)))
+        printf("cBitsOverflow = %d\n", cBitsOverflow)
         
 
-        when (!neighborVPNHit || !neighborPPNHit || neighborPPNHitWay=/=neighborVPNHitWay){
+        when (!neighborVPNHit || !neighborPPNHit || neighborPPNHitWay=/=neighborVPNHitWay || cBitsOverflow){
             printf("Create new entry\n")
             coltEntriesRegs(newEntryWay) := Cat(reqVPN, 0.U(coalBits.W), 0.U(attrBits.W), reqPPN)
             coltValidRegs(newEntryWay) := true.B
